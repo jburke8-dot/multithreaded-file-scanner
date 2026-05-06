@@ -1,2 +1,2 @@
-TODO: add better error handling later.
-This is a sample file.
+mode=development
+logging=true
