@@ -1,0 +1,2 @@
+mode=development
+logging=true
