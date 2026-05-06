@@ -1,72 +1,126 @@
-# Multithreaded File Scanner
+from __future__ import annotations
 
-## Overview
-Multithreaded File Scanner is a Python command-line tool that recursively scans directories for files matching a keyword or extension. It uses multiple worker threads to process files concurrently and produces a summary report of matches.
+import argparse
+import queue
+import threading
+from pathlib import Path
+from typing import List
 
-## Purpose
-The purpose of this project is to demonstrate concurrency, filesystem traversal, and practical command-line tool design. This project is useful for searching large folders, source code directories, or document collections more efficiently than a simple single-file script.
 
-## Technologies Used
-- Python 3
-- `threading`
-- `queue`
-- `pathlib`
-- Command-line arguments with `argparse`
+class ScanStats:
+    def __init__(self) -> None:
+        self.files_scanned = 0
+        self.matches: List[Path] = []
+        self.lock = threading.Lock()
 
-## Key Features
-- Recursively scans a target directory
-- Searches filenames and file contents
-- Uses worker threads for concurrent processing
-- Optional file extension filtering
-- Tracks total files scanned
-- Reports matched files
-- Handles unreadable files safely
-- Supports case-insensitive search
+    def record_scan(self) -> None:
+        with self.lock:
+            self.files_scanned += 1
 
-## Project Structure
-```txt
-multithreaded-file-scanner/
-├── scanner.py
-├── README.md
-└── sample_files/
-```
+    def record_match(self, path: Path) -> None:
+        with self.lock:
+            self.matches.append(path)
 
-## How to Run
-```bash
-python scanner.py --path . --keyword error
-```
 
-## Optional Arguments
-```bash
-python scanner.py --path . --keyword main --threads 8
-python scanner.py --path . --keyword TODO --extension .py
-python scanner.py --path . --keyword config --names-only
-```
+def file_contains_keyword(path: Path, keyword: str) -> bool:
+    try:
+        with path.open("r", encoding="utf-8", errors="ignore") as file:
+            for line in file:
+                if keyword in line.lower():
+                    return True
+    except OSError:
+        return False
 
-## Example Output
-```txt
-Multithreaded File Scanner
-Target path: .
-Keyword: error
-Threads: 4
+    return False
 
-Matches:
-- ./src/logger.py
-- ./notes/debugging.txt
 
-Summary:
-Files scanned: 42
-Matches found: 2
-```
+def worker(
+    tasks: "queue.Queue[Path]",
+    keyword: str,
+    stats: ScanStats,
+    names_only: bool,
+) -> None:
+    while True:
+        try:
+            path = tasks.get_nowait()
+        except queue.Empty:
+            return
 
-## My Contribution
-I designed and implemented the scanning workflow, including directory traversal, task queue creation, worker thread coordination, file content searching, and summary reporting. I also added command-line options so the tool can be reused in different contexts.
+        stats.record_scan()
 
-## Challenges and Lessons Learned
-The biggest challenge was safely coordinating multiple threads while avoiding duplicate work. This project helped me better understand thread-safe queues, filesystem operations, and how to structure command-line tools with useful options.
+        filename_match = keyword in path.name.lower()
+        content_match = False if names_only else file_contains_keyword(path, keyword)
 
-## Future Improvements
-- Add CSV or JSON report output
-- Add regex search support
-- Add file size filters
-- Add progress bar for large scans
+        if filename_match or content_match:
+            stats.record_match(path)
+
+        tasks.task_done()
+
+
+def build_task_queue(root: Path, extension: str | None) -> "queue.Queue[Path]":
+    tasks: "queue.Queue[Path]" = queue.Queue()
+
+    for path in root.rglob("*"):
+        if path.is_file():
+            if extension is None or path.suffix == extension:
+                tasks.put(path)
+
+    return tasks
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Multithreaded file scanner")
+    parser.add_argument("--path", required=True, help="Directory to scan")
+    parser.add_argument("--keyword", required=True, help="Keyword to search for")
+    parser.add_argument("--threads", type=int, default=4, help="Number of worker threads")
+    parser.add_argument("--extension", help="Optional file extension filter, such as .py")
+    parser.add_argument(
+        "--names-only",
+        action="store_true",
+        help="Only search filenames, not file contents",
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+
+    root = Path(args.path)
+    if not root.exists() or not root.is_dir():
+        raise SystemExit("Error: --path must be an existing directory")
+
+    keyword = args.keyword.lower()
+    tasks = build_task_queue(root, args.extension)
+    stats = ScanStats()
+
+    threads = []
+    for _ in range(max(1, args.threads)):
+        thread = threading.Thread(
+            target=worker,
+            args=(tasks, keyword, stats, args.names_only),
+        )
+        thread.start()
+        threads.append(thread)
+
+    for thread in threads:
+        thread.join()
+
+    print("Multithreaded File Scanner")
+    print(f"Target path: {root}")
+    print(f"Keyword: {args.keyword}")
+    print(f"Threads: {max(1, args.threads)}")
+    print("\nMatches:")
+
+    if stats.matches:
+        for match in sorted(stats.matches):
+            print(f"- {match}")
+    else:
+        print("No matches found.")
+
+    print("\nSummary:")
+    print(f"Files scanned: {stats.files_scanned}")
+    print(f"Matches found: {len(stats.matches)}")
+
+
+if __name__ == "__main__":
+    main()
